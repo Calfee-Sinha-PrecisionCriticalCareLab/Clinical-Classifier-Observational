@@ -1,0 +1,178 @@
+---
+title: "EARLI/VALID Full Featured Clinical Classifier Model"
+author: "Manoj Maddali, MD"
+date: "7/14/2021"
+output: html_document
+---
+ 
+# Setup the model
+Set up and train the model using full features  
+**Training set:** ARMA, ALVEOLI, FACTT  
+**Full Features:** age, gender, ethnicity, ARDS risk factor, temperature, systolic BP, HR, RR, vasopressor use, PEEP, paCO2, PF ratio, tidal volume (only in VALID), BMI (only in EARLI), minute ventilation (only in EARLI), glucose (only in EARLI), hematocrit, WBC count, platelet count, sodium, creatinine, albumin, bilirubin, and bicarbonate  
+
+```{r Setup, include=TRUE, echo=TRUE, messages=FALSE}
+## Load the required packages
+library(caret)
+library(dplyr)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(ggfortify)
+library(glue)
+library(readr)
+library(pROC)
+library(xgboost)
+library(OpenMPController)
+library(RColorBrewer)
+library(glue)
+require(reshape2)
+library(grid)
+library(gridExtra)
+
+## Set the seed
+set.seed(123)
+omp_set_num_threads(8) # caret parallel processing threads
+
+# No scientific notation
+options(scipen=999999)
+
+## Load the data
+# Training set
+training <- read_csv('*****')
+training <- as_tibble(training)
+
+# Validation set - EARLI
+earli <- read_csv('*****')
+earli <- as_tibble(earli)
+
+# Validation set - VALID
+valid <- read_csv('*****')
+valid <- as_tibble(valid)
+
+## Select model features (demographics, vital signs, respiratory variables, labs)
+full_features = c("age", "female", "white", "type", 
+                 "tempch", "sysbpl", "hrateh", "resph", "vasop",
+                 "peep", "paco2", "PFratio", 
+                 "bmi", "tmnvnt", "gluch", # not present in VALID
+                 "tidal", # not present in EARLI
+                 "hctl", "wbch", "plate", "sodiumh", "creath", "albuml", "bili", "bicar",
+                 "Class")
+
+# Use full features
+training = subset(training, select = full_features)
+
+## Set up the hyperparameter search grid for training set
+grid_train <- expand.grid(
+ nrounds = seq(from = 50, to = 1000, by = 50),
+ max_depth = c(2, 3, 4, 5),
+ eta = c(0.025, 0.05, 0.1, 0.3),
+ gamma = 0,
+ colsample_bytree = 1,
+ min_child_weight = 1,
+ subsample = 1
+)
+
+## Set up the hyperparameter search grid for EARLI model (re-train model given slightly different feature set)
+grid_earli <- expand.grid(
+ nrounds = seq(from = 50, to = 1000, by = 50),
+ max_depth = c(2, 3, 4, 5),
+ eta = c(0.025, 0.05, 0.1, 0.3),
+ gamma = 0,
+ colsample_bytree = 1,
+ min_child_weight = 1,
+ subsample = 1
+)
+
+## Set up the hyperparameter search grid for VALID model (re-train model given slightly different feature set)
+grid_valid <- expand.grid(
+ nrounds = seq(from = 50, to = 1000, by = 50),
+ max_depth = c(2, 3, 4, 5),
+ eta = c(0.025, 0.05, 0.1, 0.3),
+ gamma = 0,
+ colsample_bytree = 1,
+ min_child_weight = 1,
+ subsample = 1
+)
+
+# Set up 10 fold cross validation training
+train_control <- caret::trainControl(
+ method = 'cv',
+ number = 10, 
+ verboseIter = TRUE,
+ allowParallel = TRUE
+)
+
+# Train the model using full features
+xgb <- caret::train(
+ Class ~ .,
+ data = training,
+ trControl = train_control,
+ tuneGrid = grid_train,
+ na.action = na.pass,
+ method = 'xgbTree',
+ verbose = TRUE
+)
+
+# Re-Train the model using EARLI features (Tidal volume not available)
+xgb.earli <- caret::train(
+ Class ~ .,
+ data = training[,!names(training) %in% c("tidal")],
+ trControl = train_control,
+ tuneGrid = grid_earli,
+ na.action = na.pass,
+ method = 'xgbTree',
+ verbose = TRUE
+)
+
+# Re-Train the model using VALID features (BMI, Minute Ventilation, Glucose not available)
+xgb.valid <- caret::train(
+ Class ~ .,
+ data = training[,!names(training) %in% c("bmi", "tmnvnt", "gluch")],
+ trControl = train_control,
+ tuneGrid = grid_valid,
+ na.action = na.pass,
+ method = 'xgbTree',
+ verbose = TRUE
+)
+
+```
+# Evaluate in training set (ARMA, ALVEOLI, FACTT)
+```{r Evaluate in training set, include=TRUE, echo=TRUE, messages=TRUE}
+# Evaluate the model on the training set
+xgb.train = predict(xgb, training, na.action = na.pass, type="prob")
+xgb.train = xgb.train[,2] # Get whether or not we are predicting class 1 (hyper)
+xgb.train.class = ifelse(xgb.train >= 0.50, 1, 0)
+# ROC
+xgb.train.roc = roc(predictor = xgb.train, training$Class, levels=rev(levels(training$Class)), quiet=TRUE)
+# Confusion matrix
+xgb.train.cm = confusionMatrix(as.factor(xgb.train.class), training$Class, positive = "1")
+print(xgb.train.roc)
+```
+# Evaluate model performance in EARLI
+```{r Evaluate model performance in EARLI, include=TRUE, echo=TRUE, message=TRUE}
+# Predict and evaluate the model in EARLI
+xgb.earli.pred = predict(xgb.earli, earli, na.action = na.pass, type="prob")
+xgb.earli.pred = xgb.earli.pred[,2] # Get whether or not we are predicting class 1 (hyper)
+xgb.earli.pred.class = ifelse(xgb.earli.pred >= 0.50, 1, 0)
+# Confusion Matrix
+xgb.earli.pred.cm = confusionMatrix(as.factor(xgb.earli.pred.class), earli$Class, positive = "1")
+# ROC
+xgb.earli.pred.roc = roc(predictor = xgb.earli.pred, earli$Class, levels=rev(levels(earli$Class)), quiet=TRUE)
+xgb.earli.pred.roc.ci = ci(xgb.earli.pred.roc)
+print(xgb.earli.pred.roc)
+print(xgb.earli.pred.roc.ci)
+```
+# Evaluate model performance in VALID
+```{r Evaluate model performance in VALID, include=TRUE, echo=TRUE, message=TRUE}
+# Predict and evaluate the model on test set
+xgb.valid.pred = predict(xgb.valid, valid, na.action = na.pass, type="prob")
+xgb.valid.pred = xgb.valid.pred[,2] # Get whether or not we are predicting class 1 (hyper)
+xgb.valid.pred.class = ifelse(xgb.valid.pred >= 0.50, 1, 0)
+# Confusion Matrix
+xgb.valid.pred.cm = confusionMatrix(as.factor(xgb.valid.pred.class), valid$Class, positive = "1")
+# ROC
+xgb.valid.pred.roc = roc(predictor = xgb.valid.pred, valid$Class, levels=rev(levels(valid$Class)), quiet=TRUE)
+xgb.valid.pred.roc.ci = ci(xgb.valid.pred.roc)
+print(xgb.valid.pred.roc)
+print(xgb.valid.pred.roc.ci)
+```

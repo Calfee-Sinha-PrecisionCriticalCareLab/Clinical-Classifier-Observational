@@ -1,0 +1,118 @@
+---
+title: "LUNG-SAFE Clinical Classifier Model"
+author: "Manoj Maddali, MD"
+date: "7/14/2021"
+output:
+  html_document: default
+  word_document: default
+---
+
+# Setup the model
+Set up and train the model using LUNG SAFE only vitals and labs features.  
+**Training set:** ARMA, ALVEOLI, FACTT  
+**Features:** Respiratory Rate, MAP, Vasopressor Use, Platelets, Creatinine, Bicarbonate, Bilirubin
+```{r Setup, include=TRUE, echo=TRUE, messages=FALSE}
+## Load the required packages
+library(caret)
+library(dplyr)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(survival)
+library(survminer)
+library(ggfortify)
+library(glue)
+library(readr)
+library(pROC)
+library(xgboost)
+library(OpenMPController)
+library(RColorBrewer)
+library(glue)
+
+## Set the seed
+set.seed(2021)
+omp_set_num_threads(8) # caret parallel processing threads
+
+# No scientific notation
+options(scipen=999999)
+
+## Load the data
+# Training set
+training <- read_csv('*****')
+training <- as_tibble(training)
+
+# Validation sets
+sails <- read_csv('*****')
+sails <- as_tibble(sails)
+
+valid <- read_csv('*****')
+valid <- as_tibble(valid)
+
+# Evaluation set
+lungsafe <- read_csv('****')
+lungsafe <- as_tibble(lungsafe)
+
+## Select model features
+lungsafe_features = c('resph', 'map', 'vasop', 'plate', 'creath', 'bicar', 'bili')
+training = subset(training, select = append(lungsafe_features, c('Class'), after = length(lungsafe_features)))
+
+## Set up the hyperparameter search grid
+grid_default <- expand.grid(
+  nrounds = seq(from = 50, to = 1000, by = 50),
+  max_depth = c(2, 3, 4, 5),
+  eta = c(0.025, 0.05, 0.1, 0.3),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+# Set up 10 fold cross validation training 
+train_control <- caret::trainControl(
+  method = 'cv',
+  number = 10, 
+  verboseIter = TRUE,
+  allowParallel = TRUE
+)
+
+# Train the model
+xgb <- caret::train(
+  Class ~ .,
+  data = training,
+  trControl = train_control,
+  tuneGrid = grid_default,
+  na.action = na.pass,
+  method = 'xgbTree',
+  verbose = TRUE
+)
+
+```
+# Validate model in SAILS to optimize cutoff
+``` {r Test in SAILS, include = TRUE, echo=TRUE, messages=TRUE}
+# Predict and evaluate the model on SAILS
+xgb.sails = predict(xgb, sails, na.action = na.pass, type="prob")
+xgb.sails = xgb.sails[,2] # Get whether or not we are predicting class 1
+
+# ROC
+xgb.sails.roc = roc(predictor = xgb.sails, sails$Class, levels=rev(levels(sails$Class)), quiet=TRUE)
+xgb.sails.roc.ci = ci(xgb.sails.roc)
+```
+# Validate model in VALID to optimize cutoff
+``` {r Test in VALID, include = TRUE, echo=TRUE, messages=TRUE}
+# Predict and evaluate the model on VALID
+xgb.valid = predict(xgb, valid, na.action = na.pass, type="prob")
+xgb.valid = xgb.valid[,2] # Get whether or not we are predicting class 1
+
+# ROC
+xgb.valid.roc = roc(predictor = xgb.valid, valid$Class, levels=rev(levels(valid$Class)), quiet=TRUE)
+xgb.valid.roc.ci = ci(xgb.valid.roc)
+```
+# Evaluate in LUNGSAFE
+```{r Evaluate in LUNG SAFE, include=TRUE, echo=TRUE, messages=TRUE}
+# Predict class phenotypes in LUNG SAFE
+xgb.pred = predict(xgb, lungsafe, na.action = na.pass, type="prob")
+xgb.pred = xgb.pred[,2] # Get whether or not we are predicting class 1
+
+# Use a cutoff of 0.4 for predictions
+lungsafe$Class = ifelse(xgb.pred >= 0.4, 1, 0)
+```
